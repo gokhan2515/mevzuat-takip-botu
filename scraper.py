@@ -18,9 +18,9 @@ HEADERS = {
 
 EXCLUDE_KEYWORDS = [
     "ziyaret etti", "ziyareti", "heyet", "çalıştay", "yemin ederek",
-    "atama kararları", "atanan", "vefat", "başsağlığı", "kutlama",
+    "atama kararları", "atanan", "seçildi", "vefat", "başsağlığı", "kutlama",
     "sınav", "personel alımı", "sözleşmeli personel", "mülakat",
-    "staj", "eğitim programı", "sözlüğü", "sempozyum", "zirvesi"
+    "staj", "eğitim programı", "sözlüğü", "sempozyum", "zirvesi", "boru gazı ithalat"
 ]
 
 CATEGORIES = {
@@ -43,7 +43,7 @@ CATEGORIES = {
     "#ArGe_Teknopark": [
         "ar-ge", "arge", "teknopark", "teknoloji geliştirme", "4691", "5746",
         "tübitak", "teydeb", "tasarım merkezi", "inovasyon", "girişim sermayesi",
-        "yazılım", "bilişim", "patent", "ticarileşme", "teknokent", "çağrı"
+        "yazılım", "bilişim", "patent", "ticarileşme", "teknokent", "destek çağrı", "proje çağrı"
     ]
 }
 
@@ -62,8 +62,8 @@ def save_seen(seen_set):
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(recent_list, f, ensure_ascii=False, indent=2)
 
-def make_id(source, link, title):
-    raw = f"{source}:{link.strip()}:{title[:60].strip().lower()}"
+def make_id(source, title):
+    raw = f"{source}:{title[:80].strip().lower()}"
     return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 def match_categories(title):
@@ -104,7 +104,6 @@ def send_telegram(source, title, link, tags):
         return False
 
 def fetch_url(url, encoding=None):
-    # (5 sn bağlantı kurma, 8 sn veri okuma limiti - asılı kalmayı önler)
     resp = requests.get(url, headers=HEADERS, timeout=(5, 8), verify=False)
     if encoding:
         resp.encoding = encoding
@@ -124,64 +123,64 @@ def scrape_resmi_gazete():
                 items.append(("Resmî Gazete", title, full_link))
         log(f"   -> Resmî Gazete tamam ({len(items)} kayıt).")
     except Exception as e:
-        log(f"   -> Resmî Gazete atlandı (zaman aşımı/engel): {e}")
+        log(f"   -> Resmî Gazete atlandı: {e}")
     return items
 
 def scrape_gib():
     log("2/5 GİB taranıyor...")
     items = []
     try:
-        html = fetch_url("https://www.gib.gov.tr/duyurular")
+        html = fetch_url("https://www.gib.gov.tr/")
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
-            if len(title) > 25 and ("duyuru" in href.lower() or "mevzuat" in href.lower()):
-                full_link = href if href.startswith("http") else f"https://www.gib.gov.tr{href}"
+            if len(title) > 25 and len(title) < 250 and ("duyuru" in href.lower() or "sirkuler" in href.lower() or "teblig" in href.lower()):
+                full_link = href if href.startswith("http") else f"https://www.gib.gov.tr/{href.lstrip('/')}"
                 items.append(("Gelir İdaresi Bşk. (GİB)", title, full_link))
         log(f"   -> GİB tamam ({len(items)} kayıt).")
     except Exception as e:
-        log(f"   -> GİB atlandı (zaman aşımı/engel): {e}")
+        log(f"   -> GİB atlandı: {e}")
     return items
 
 def scrape_sanayi():
     log("3/5 Sanayi Bakanlığı taranıyor...")
     items = []
     try:
-        html = fetch_url("https://www.sanayi.gov.tr/medya/duyurular")
+        html = fetch_url("https://www.sanayi.gov.tr/")
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
-            if len(title) > 25 and ("duyuru" in href.lower() or "haber" in href.lower()):
-                full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr{href}"
+            if len(title) > 25 and len(title) < 250 and ("duyuru" in href.lower() or "haber" in href.lower()):
+                full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr/{href.lstrip('/')}"
                 items.append(("Sanayi ve Teknoloji Bak.", title, full_link))
         log(f"   -> Sanayi Bak. tamam ({len(items)} kayıt).")
     except Exception as e:
-        log(f"   -> Sanayi Bak. atlandı (zaman aşımı/engel): {e}")
+        log(f"   -> Sanayi Bak. atlandı: {e}")
     return items
 
 def scrape_tubitak():
     log("4/5 TÜBİTAK taranıyor...")
     items = []
     try:
-        html = fetch_url("https://tubitak.gov.tr/tr/duyurular")
+        html = fetch_url("https://tubitak.gov.tr/tr")
         soup = BeautifulSoup(html, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
-            if len(title) > 25 and "duyuru" in href.lower():
-                full_link = href if href.startswith("http") else f"https://tubitak.gov.tr{href}"
+            if len(title) > 25 and len(title) < 250 and ("duyuru" in href.lower() or "cagri" in href.lower()):
+                full_link = href if href.startswith("http") else f"https://tubitak.gov.tr/{href.lstrip('/')}"
                 items.append(("TÜBİTAK", title, full_link))
         log(f"   -> TÜBİTAK tamam ({len(items)} kayıt).")
     except Exception as e:
-        log(f"   -> TÜBİTAK atlandı (zaman aşımı/engel): {e}")
+        log(f"   -> TÜBİTAK atlandı: {e}")
     return items
 
 def scrape_epdk():
     log("5/5 EPDK taranıyor...")
     items = []
-    seen_links = set()
+    seen_titles = set()
     try:
         html = fetch_url("https://www.epdk.gov.tr/Detay/Icerik/3-0-0/duyurular")
         soup = BeautifulSoup(html, "html.parser")
@@ -189,13 +188,14 @@ def scrape_epdk():
             title = " ".join(a.get_text().split())
             href = a["href"]
             if len(title) > 25 and len(title) < 220 and "Detay/Icerik" in href:
-                full_link = href if href.startswith("http") else f"https://www.epdk.gov.tr{href}"
-                if full_link not in seen_links:
-                    seen_links.add(full_link)
+                norm_title = title.lower()
+                if norm_title not in seen_titles:
+                    seen_titles.add(norm_title)
+                    full_link = href if href.startswith("http") else f"https://www.epdk.gov.tr{href}"
                     items.append(("EPDK", title, full_link))
         log(f"   -> EPDK tamam ({len(items)} kayıt).")
     except Exception as e:
-        log(f"   -> EPDK atlandı (zaman aşımı/engel): {e}")
+        log(f"   -> EPDK atlandı: {e}")
     return items
 
 def main():
@@ -213,7 +213,7 @@ def main():
     new_count = 0
 
     for source, title, link in all_items:
-        item_id = make_id(source, link, title)
+        item_id = make_id(source, title)
         if item_id in seen:
             continue
 
