@@ -4,6 +4,7 @@ import time
 import json
 import hashlib
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -24,7 +25,8 @@ EXCLUDE_KEYWORDS = [
     "ziyaret etti", "ziyareti", "heyet", "çalıştay", "yemin ederek",
     "atama kararları", "atanan", "seçildi", "vefat", "başsağlığı", "kutlama",
     "sınav", "personel alımı", "sözleşmeli personel", "mülakat",
-    "staj", "eğitim programı", "sözlüğü", "sempozyum", "zirvesi"
+    "staj", "eğitim programı", "sözlüğü", "sempozyum", "zirvesi",
+    "bilim fuarları", "bilim söyleşileri"
 ]
 
 EPDK_KEYWORDS = [
@@ -137,71 +139,96 @@ def send_telegram(source, title, link, tags):
         log(f"Telegram bağlantı hatası: {e}")
         return False
 
-def scrape_resmi_gazete(page):
-    log("1/7 Resmî Gazete (Tam Sayı) taranıyor...")
+def scrape_google_site_rss(domain, source_name):
     items = []
     seen_titles = set()
+    rss_url = f"https://news.google.com/rss/search?q=site:{domain}+when:7d&hl=tr&gl=TR&ceid=TR:tr"
     try:
-        page.goto("https://www.resmigazete.gov.tr/", wait_until="networkidle", timeout=20000)
-        page.wait_for_timeout(1500)
-        links = page.query_selector_all("a")
-        for a in links:
-            title = " ".join((a.inner_text() or "").split())
-            href = a.get_attribute("href") or ""
-            if len(title) > 22 and (".htm" in href.lower() or ".pdf" in href.lower()):
-                norm = tr_lower(title)
-                if norm not in seen_titles and "önceki sayı" not in norm:
-                    seen_titles.add(norm)
-                    full_link = href if href.startswith("http") else f"https://www.resmigazete.gov.tr/{href.lstrip('/')}"
-                    items.append(("Resmî Gazete", title, full_link))
-        log(f"   -> Resmî Gazete tamam ({len(items)} kayıt).")
-    except Exception as e:
-        log(f"   -> Resmî Gazete atlandı: {e}")
-    return items
-
-def scrape_gib(page):
-    log("2/7 GİB (Tarayıcı) taranıyor...")
-    items = []
-    seen_titles = set()
-    for url in ["https://www.gib.gov.tr/duyurular", "https://www.gib.gov.tr/mevzuat"]:
-        try:
-            page.goto(url, wait_until="networkidle", timeout=20000)
-            page.wait_for_timeout(2000)
-            links = page.query_selector_all("a")
-            for a in links:
-                title = " ".join((a.inner_text() or "").split())
-                href = a.get_attribute("href") or ""
-                if 20 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "sirkuler", "teblig", "kanun", "karar"]):
-                    norm = tr_lower(title)
-                    if norm not in seen_titles:
+        r = requests.get(rss_url, headers=HEADERS, timeout=(5, 10))
+        if r.status_code == 200:
+            root = ET.fromstring(r.text)
+            for item in root.findall(".//item"):
+                title_el = item.find("title")
+                link_el = item.find("link")
+                if title_el is not None and link_el is not None:
+                    raw_title = (title_el.text or "").split(" - ")[0].strip()
+                    link = (link_el.text or "").strip()
+                    norm = tr_lower(raw_title)
+                    if len(raw_title) > 15 and norm not in seen_titles:
                         seen_titles.add(norm)
-                        full_link = href if href.startswith("http") else f"https://www.gib.gov.tr{href}"
-                        items.append(("Gelir İdaresi Bşk. (GİB)", title, full_link))
-        except Exception:
-            continue
-    log(f"   -> GİB tamam ({len(items)} kayıt).")
+                        items.append((source_name, raw_title, link))
+    except Exception:
+        pass
     return items
 
-def scrape_sanayi(page):
-    log("3/7 Sanayi Bakanlığı (Tarayıcı) taranıyor...")
+def scrape_resmi_gazete(page):
+    log("1/7 Resmî Gazete (Günlük Tam Sayı) taranıyor...")
     items = []
     seen_titles = set()
-    for url in ["https://www.sanayi.gov.tr/medya/duyurular", "https://www.sanayi.gov.tr/mevzuat"]:
+    now = get_tr_now()
+    daily_url = f"https://www.resmigazete.gov.tr/eskiler/{now.strftime('%Y')}/{now.strftime('%m')}/{now.strftime('%Y%m%d')}.htm"
+    
+    for target in [daily_url, "https://www.resmigazete.gov.tr/"]:
         try:
-            page.goto(url, wait_until="networkidle", timeout=20000)
+            page.goto(target, wait_until="domcontentloaded", timeout=15000)
             page.wait_for_timeout(1500)
             links = page.query_selector_all("a")
             for a in links:
                 title = " ".join((a.inner_text() or "").split())
                 href = a.get_attribute("href") or ""
-                if 22 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "haber", "mevzuat", "detay"]):
+                if len(title) > 20 and (".htm" in href.lower() or ".pdf" in href.lower()):
                     norm = tr_lower(title)
-                    if norm not in seen_titles:
+                    if norm not in seen_titles and "önceki sayı" not in norm:
                         seen_titles.add(norm)
-                        full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr{href}"
-                        items.append(("Sanayi ve Teknoloji Bak.", title, full_link))
+                        if href.startswith("http"):
+                            full_link = href
+                        elif href.startswith("/"):
+                            full_link = f"https://www.resmigazete.gov.tr{href}"
+                        else:
+                            base_dir = target.rsplit("/", 1)[0]
+                            full_link = f"{base_dir}/{href}"
+                        items.append(("Resmî Gazete", title, full_link))
+            if len(items) > 6:
+                break
         except Exception:
             continue
+
+    log(f"   -> Resmî Gazete tamam ({len(items)} kayıt).")
+    return items
+
+def scrape_gib(page):
+    log("2/7 GİB taranıyor...")
+    items = scrape_google_site_rss("gib.gov.tr", "Gelir İdaresi Bşk. (GİB)")
+    if not items:
+        try:
+            page.goto("https://www.gib.gov.tr/duyurular", wait_until="domcontentloaded", timeout=12000)
+            page.wait_for_timeout(1500)
+            for a in page.query_selector_all("a"):
+                title = " ".join((a.inner_text() or "").split())
+                href = a.get_attribute("href") or ""
+                if 20 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "sirkuler", "teblig"]):
+                    full_link = href if href.startswith("http") else f"https://www.gib.gov.tr{href}"
+                    items.append(("Gelir İdaresi Bşk. (GİB)", title, full_link))
+        except Exception:
+            pass
+    log(f"   -> GİB tamam ({len(items)} kayıt).")
+    return items
+
+def scrape_sanayi(page):
+    log("3/7 Sanayi Bakanlığı taranıyor...")
+    items = scrape_google_site_rss("sanayi.gov.tr", "Sanayi ve Teknoloji Bak.")
+    if not items:
+        try:
+            page.goto("https://www.sanayi.gov.tr/medya/duyurular", wait_until="domcontentloaded", timeout=12000)
+            page.wait_for_timeout(1500)
+            for a in page.query_selector_all("a"):
+                title = " ".join((a.inner_text() or "").split())
+                href = a.get_attribute("href") or ""
+                if 22 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "haber", "mevzuat"]):
+                    full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr{href}"
+                    items.append(("Sanayi ve Teknoloji Bak.", title, full_link))
+        except Exception:
+            pass
     log(f"   -> Sanayi Bak. tamam ({len(items)} kayıt).")
     return items
 
@@ -298,7 +325,6 @@ def main():
     is_first_run = (len(seen) == 0)
     all_items = []
 
-    # JavaScript tabanlı kurumlar için gerçek tarayıcı başlat
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(user_agent=HEADERS["User-Agent"], ignore_https_errors=True)
@@ -308,7 +334,6 @@ def main():
         all_items.extend(scrape_sanayi(page))
         browser.close()
 
-    # Klasik HTML kurumlar
     all_items.extend(scrape_turmob())
     all_items.extend(scrape_tubitak())
     all_items.extend(scrape_epdk())
