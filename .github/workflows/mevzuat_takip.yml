@@ -2,10 +2,9 @@ name: Mevzuat ve Teşvik Takip Botu
 
 on:
   schedule:
-    # Türkiye saatiyle (UTC+3) 09:00 - 23:00 arası saat başı çalışır
-    # Gece 00:00 - 08:59 arası çalışmaz
+    # Türkiye saatiyle (UTC+3) her gün 09:00 - 23:00 arası saat başı çalışır
     - cron: '0 6-20 * * *'
-  workflow_dispatch: # İstediğiniz an Actions sekmesinden tek tıkla manuel çalıştırabilirsiniz
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,6 +12,7 @@ permissions:
 jobs:
   check-mevzuat:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
 
     steps:
       - name: Depoyu İndir
@@ -24,18 +24,20 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Kütüphaneleri Yükle
+      - name: Gerekli Kütüphaneleri ve Tarayıcıyı Kur
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Kurumları Tara ve Bildirim Gönder
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python scraper.py
+        run: python scraper.py
 
-      - name: Hafıza Dosyasını Güncelle (seen_items.json)
+      - name: Hafızayı (seen_items.json) Güncelle
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
