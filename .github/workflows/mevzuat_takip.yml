@@ -1,0 +1,43 @@
+name: Mevzuat ve Teşvik Takip Botu
+
+on:
+  schedule:
+    # Türkiye saatiyle (UTC+3) 09:00 - 23:00 arası saat başı çalışır
+    # Gece 00:00 - 08:59 arası çalışmaz
+    - cron: '0 6-20 * * *'
+  workflow_dispatch: # İstediğiniz an Actions sekmesinden tek tıkla manuel çalıştırabilirsiniz
+
+permissions:
+  contents: write
+
+jobs:
+  check-mevzuat:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu İndir
+        uses: actions/checkout@v4
+
+      - name: Python Kurulumu
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Kütüphaneleri Yükle
+        run: |
+          pip install -r requirements.txt
+
+      - name: Kurumları Tara ve Bildirim Gönder
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scraper.py
+
+      - name: Hafıza Dosyasını Güncelle (seen_items.json)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add data/seen_items.json
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update seen_items.json" && git push)
