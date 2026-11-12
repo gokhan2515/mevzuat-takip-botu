@@ -6,6 +6,7 @@ import hashlib
 import requests
 from datetime import datetime, timezone, timedelta
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -19,7 +20,6 @@ HEADERS = {
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7"
 }
 
-# Hariç tutulacak PR / Ziyaret / Atama / Sınav kelimeleri
 EXCLUDE_KEYWORDS = [
     "ziyaret etti", "ziyareti", "heyet", "çalıştay", "yemin ederek",
     "atama kararları", "atanan", "seçildi", "vefat", "başsağlığı", "kutlama",
@@ -27,17 +27,15 @@ EXCLUDE_KEYWORDS = [
     "staj", "eğitim programı", "sözlüğü", "sempozyum", "zirvesi"
 ]
 
-# EPDK için özel daraltılmış anahtar kelimeler (Sadece bunlar geçerse bildirilir)
 EPDK_KEYWORDS = [
     "yekdem", "biyogaz", "biogas", "çöpgaz", "yenilenebilir enerji", "lng"
 ]
 
-# Diğer tüm kurumlar için kategori sözlüğü
 CATEGORIES = {
     "#KDV_Kurumlar": [
         "kdv", "katma değer vergisi", "kurumlar vergisi", "tevkifat",
         "vergi usul", "indirimli kurumlar", "yatırıma katkı", "enflasyon düzeltmesi",
-        "matrah", "istisna", "muafiyet", "stopaj", "beyanname", "sirküler", "vergi tebliği", "gelir idaresi"
+        "matrah", "istisna", "muafiyet", "stopaj", "beyanname", "sirküler", "tebliğ", "gelir idaresi"
     ],
     "#Enerji_Tesvik": [
         "yekdem", "biyogaz", "biogas", "çöpgaz", "yenilenebilir enerji", "lng",
@@ -52,7 +50,7 @@ CATEGORIES = {
     "#ArGe_Teknopark": [
         "ar-ge", "arge", "teknopark", "teknoloji geliştirme", "4691", "5746",
         "tübitak", "teydeb", "tasarım merkezi", "inovasyon", "girişim sermayesi",
-        "yazılım", "bilişim", "patent", "ticarileşme", "teknokent", "destek çağrısı", "proje çağrısı"
+        "yazılım", "bilişim", "patent", "ticarileşme", "teknokent", "destek çağrısı", "proje çağrısı", "çağrı"
     ]
 }
 
@@ -96,7 +94,6 @@ def match_categories(source, title):
     if any(bad in text for bad in EXCLUDE_KEYWORDS):
         return []
     
-    # EPDK özel kuralı: Sadece belirlenen 6 kelimeden biri geçiyorsa al
     if source == "EPDK":
         if any(has_word(text, kw) for kw in EPDK_KEYWORDS):
             return ["#Enerji_Tesvik"]
@@ -140,134 +137,94 @@ def send_telegram(source, title, link, tags):
         log(f"Telegram bağlantı hatası: {e}")
         return False
 
-def fetch_url(url, encoding=None):
-    resp = requests.get(url, headers=HEADERS, timeout=(5, 10), verify=False)
-    if encoding:
-        resp.encoding = encoding
-    return resp.text
-
-def scrape_resmi_gazete():
-    log("1/7 Resmî Gazete (Günlük Tam Sayı) taranıyor...")
+def scrape_resmi_gazete(page):
+    log("1/7 Resmî Gazete (Tam Sayı) taranıyor...")
     items = []
     seen_titles = set()
-    now = get_tr_now()
-    
-    # Doğrudan günün tarihli tam sayı sayfasını ve ana sayfayı kontrol et
-    daily_url = f"https://www.resmigazete.gov.tr/eskiler/{now.strftime('%Y')}/{now.strftime('%m')}/{now.strftime('%Y%m%d')}.htm"
-    urls_to_try = [daily_url, "https://www.resmigazete.gov.tr/"]
-
-    for target_url in urls_to_try:
-        try:
-            resp = requests.get(target_url, headers=HEADERS, timeout=(5, 10), verify=False)
-            if resp.status_code != 200:
-                continue
-            # Resmî Gazete arşiv sayfaları bazen windows-1254 veya utf-8 döner
-            resp.encoding = resp.apparent_encoding or "utf-8"
-            soup = BeautifulSoup(resp.text, "html.parser")
-            
-            for a in soup.find_all("a", href=True):
-                title = " ".join(a.get_text().split())
-                href = a["href"]
-                if len(title) > 20 and (".htm" in href.lower() or ".pdf" in href.lower()):
-                    norm = tr_lower(title)
-                    if norm not in seen_titles and "önceki sayı" not in norm:
-                        seen_titles.add(norm)
-                        if href.startswith("http"):
-                            full_link = href
-                        elif href.startswith("/"):
-                            full_link = f"https://www.resmigazete.gov.tr{href}"
-                        else:
-                            base_dir = target_url.rsplit("/", 1)[0]
-                            full_link = f"{base_dir}/{href}"
-                        items.append(("Resmî Gazete", title, full_link))
-            if len(items) > 6:
-                break
-        except Exception as e:
-            log(f"   -> Resmî Gazete denemesi ({target_url}): {e}")
-
-    log(f"   -> Resmî Gazete tamam ({len(items)} kayıt).")
+    try:
+        page.goto("https://www.resmigazete.gov.tr/", wait_until="networkidle", timeout=20000)
+        page.wait_for_timeout(1500)
+        links = page.query_selector_all("a")
+        for a in links:
+            title = " ".join((a.inner_text() or "").split())
+            href = a.get_attribute("href") or ""
+            if len(title) > 22 and (".htm" in href.lower() or ".pdf" in href.lower()):
+                norm = tr_lower(title)
+                if norm not in seen_titles and "önceki sayı" not in norm:
+                    seen_titles.add(norm)
+                    full_link = href if href.startswith("http") else f"https://www.resmigazete.gov.tr/{href.lstrip('/')}"
+                    items.append(("Resmî Gazete", title, full_link))
+        log(f"   -> Resmî Gazete tamam ({len(items)} kayıt).")
+    except Exception as e:
+        log(f"   -> Resmî Gazete atlandı: {e}")
     return items
 
-def scrape_turmob():
-    log("2/7 TÜRMOB (Mevzuat Sirküleri) taranıyor...")
+def scrape_gib(page):
+    log("2/7 GİB (Tarayıcı) taranıyor...")
     items = []
     seen_titles = set()
-    urls = [
-        "https://www.turmob.org.tr/Mevzuat/Sirkuler",
-        "https://www.turmob.org.tr/Haberler"
-    ]
-    for url in urls:
+    for url in ["https://www.gib.gov.tr/duyurular", "https://www.gib.gov.tr/mevzuat"]:
         try:
-            html = fetch_url(url, "utf-8")
-            soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True):
-                title = " ".join(a.get_text().split())
-                href = a["href"]
-                if 20 < len(title) < 260 and ("sirkuler" in href.lower() or "detay" in href.lower() or "haber" in href.lower()):
+            page.goto(url, wait_until="networkidle", timeout=20000)
+            page.wait_for_timeout(2000)
+            links = page.query_selector_all("a")
+            for a in links:
+                title = " ".join((a.inner_text() or "").split())
+                href = a.get_attribute("href") or ""
+                if 20 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "sirkuler", "teblig", "kanun", "karar"]):
                     norm = tr_lower(title)
                     if norm not in seen_titles:
                         seen_titles.add(norm)
-                        full_link = href if href.startswith("http") else f"https://www.turmob.org.tr/{href.lstrip('/')}"
-                        items.append(("TÜRMOB", title, full_link))
+                        full_link = href if href.startswith("http") else f"https://www.gib.gov.tr{href}"
+                        items.append(("Gelir İdaresi Bşk. (GİB)", title, full_link))
         except Exception:
             continue
-    log(f"   -> TÜRMOB tamam ({len(items)} kayıt).")
-    return items
-
-def scrape_gib():
-    log("3/7 GİB taranıyor...")
-    items = []
-    seen_titles = set()
-    # GİB yeni Next.js API uçlarını ve klasik duyuru sayfalarını dene
-    api_endpoints = [
-        "https://www.gib.gov.tr/api/duyuru/list?page=0&size=20",
-        "https://www.gib.gov.tr/api/mevzuat/list?page=0&size=20"
-    ]
-    for api_url in api_endpoints:
-        try:
-            r = requests.get(api_url, headers=HEADERS, timeout=(5, 8), verify=False)
-            if r.status_code == 200 and "application/json" in r.headers.get("Content-Type", ""):
-                data = r.json()
-                records = data.get("content") or data.get("data") or (data if isinstance(data, list) else [])
-                for rec in records:
-                    title = str(rec.get("baslik") or rec.get("title") or "").strip()
-                    slug = str(rec.get("slug") or rec.get("id") or "").strip()
-                    if len(title) > 15:
-                        norm = tr_lower(title)
-                        if norm not in seen_titles:
-                            seen_titles.add(norm)
-                            link = f"https://www.gib.gov.tr/duyuru/{slug}" if slug else "https://www.gib.gov.tr/duyurular"
-                            items.append(("Gelir İdaresi Bşk. (GİB)", title, link))
-        except Exception:
-            continue
-
     log(f"   -> GİB tamam ({len(items)} kayıt).")
     return items
 
-def scrape_sanayi():
-    log("4/7 Sanayi Bakanlığı taranıyor...")
+def scrape_sanayi(page):
+    log("3/7 Sanayi Bakanlığı (Tarayıcı) taranıyor...")
     items = []
     seen_titles = set()
-    endpoints = [
-        "https://www.sanayi.gov.tr/medya/duyurular",
-        "https://www.sanayi.gov.tr/mevzuat"
-    ]
-    for ep in endpoints:
+    for url in ["https://www.sanayi.gov.tr/medya/duyurular", "https://www.sanayi.gov.tr/mevzuat"]:
         try:
-            html = fetch_url(ep, "utf-8")
-            soup = BeautifulSoup(html, "html.parser")
-            for a in soup.find_all("a", href=True):
-                title = " ".join(a.get_text().split())
-                href = a["href"]
-                if 25 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "haber", "mevzuat", "detay"]):
+            page.goto(url, wait_until="networkidle", timeout=20000)
+            page.wait_for_timeout(1500)
+            links = page.query_selector_all("a")
+            for a in links:
+                title = " ".join((a.inner_text() or "").split())
+                href = a.get_attribute("href") or ""
+                if 22 < len(title) < 250 and any(k in href.lower() for k in ["duyuru", "haber", "mevzuat", "detay"]):
                     norm = tr_lower(title)
                     if norm not in seen_titles:
                         seen_titles.add(norm)
-                        full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr/{href.lstrip('/')}"
+                        full_link = href if href.startswith("http") else f"https://www.sanayi.gov.tr{href}"
                         items.append(("Sanayi ve Teknoloji Bak.", title, full_link))
         except Exception:
             continue
     log(f"   -> Sanayi Bak. tamam ({len(items)} kayıt).")
+    return items
+
+def scrape_turmob():
+    log("4/7 TÜRMOB (Mevzuat Sirküleri) taranıyor...")
+    items = []
+    seen_titles = set()
+    try:
+        resp = requests.get("https://www.turmob.org.tr/Mevzuat", headers=HEADERS, timeout=(5, 10), verify=False)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for a in soup.find_all("a", href=True):
+            title = " ".join(a.get_text().split())
+            href = a["href"]
+            if 20 < len(title) < 260 and ("sirkuler" in href.lower() or "detay" in href.lower() or "mevzuat" in href.lower()):
+                norm = tr_lower(title)
+                if norm not in seen_titles:
+                    seen_titles.add(norm)
+                    full_link = href if href.startswith("http") else f"https://www.turmob.org.tr/{href.lstrip('/')}"
+                    items.append(("TÜRMOB", title, full_link))
+        log(f"   -> TÜRMOB tamam ({len(items)} kayıt).")
+    except Exception as e:
+        log(f"   -> TÜRMOB atlandı: {e}")
     return items
 
 def scrape_tubitak():
@@ -275,8 +232,9 @@ def scrape_tubitak():
     items = []
     seen_titles = set()
     try:
-        html = fetch_url("https://tubitak.gov.tr/tr/duyurular", "utf-8")
-        soup = BeautifulSoup(html, "html.parser")
+        resp = requests.get("https://tubitak.gov.tr/tr", headers=HEADERS, timeout=(5, 10), verify=False)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
@@ -296,8 +254,9 @@ def scrape_epdk():
     items = []
     seen_titles = set()
     try:
-        html = fetch_url("https://www.epdk.gov.tr/Detay/Icerik/3-0-0/duyurular", "utf-8")
-        soup = BeautifulSoup(html, "html.parser")
+        resp = requests.get("https://www.epdk.gov.tr/Detay/Icerik/3-0-0/duyurular", headers=HEADERS, timeout=(5, 10), verify=False)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
@@ -317,8 +276,9 @@ def scrape_kosgeb():
     items = []
     seen_titles = set()
     try:
-        html = fetch_url("https://www.kosgeb.gov.tr/site/tr/genel/liste/1/duyurular", "utf-8")
-        soup = BeautifulSoup(html, "html.parser")
+        resp = requests.get("https://www.kosgeb.gov.tr/site/tr/genel/liste/1/duyurular", headers=HEADERS, timeout=(5, 10), verify=False)
+        resp.encoding = "utf-8"
+        soup = BeautifulSoup(resp.text, "html.parser")
         for a in soup.find_all("a", href=True):
             title = " ".join(a.get_text().split())
             href = a["href"]
@@ -336,12 +296,20 @@ def scrape_kosgeb():
 def main():
     seen = load_seen()
     is_first_run = (len(seen) == 0)
-    
     all_items = []
-    all_items.extend(scrape_resmi_gazete())
+
+    # JavaScript tabanlı kurumlar için gerçek tarayıcı başlat
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(user_agent=HEADERS["User-Agent"], ignore_https_errors=True)
+        page = context.new_page()
+        all_items.extend(scrape_resmi_gazete(page))
+        all_items.extend(scrape_gib(page))
+        all_items.extend(scrape_sanayi(page))
+        browser.close()
+
+    # Klasik HTML kurumlar
     all_items.extend(scrape_turmob())
-    all_items.extend(scrape_gib())
-    all_items.extend(scrape_sanayi())
     all_items.extend(scrape_tubitak())
     all_items.extend(scrape_epdk())
     all_items.extend(scrape_kosgeb())
@@ -356,7 +324,7 @@ def main():
 
         tags = match_categories(source, title)
         if tags:
-            if is_first_run and new_count >= 5:
+            if is_first_run and new_count >= 8:
                 seen.add(item_id)
                 continue
 
